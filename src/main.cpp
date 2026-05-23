@@ -13,6 +13,12 @@
 #define OWM_COUNTRY          "TH"
 #define WEATHER_INTERVAL_MS  (2UL * 60UL * 1000UL)
 
+// --- Telegram Bot ---
+#define TG_BOT_TOKEN  "8948698437:AAETguWxKsAg0ILJ8ANmZVGpHOsIs5-dLoY"   // เช่น 123456789:ABCdef...
+#define TG_CHAT_ID    "7745779456"     // เช่น 123456789 หรือ -100123456789
+#define AQI_ALERT_THRESHOLD   3          // แจ้งเตือนเมื่อ AQI >= ค่านี้
+#define PM25_ALERT_THRESHOLD  35.0f      // แจ้งเตือนเมื่อ PM2.5 >= ค่านี้ (µg/m³)
+
 // --- OLED ---
 #define OLED_SDA     21
 #define OLED_SCL     22
@@ -34,7 +40,7 @@
 #define SW3 32
 
 #define DEBOUNCE_MS          20
-#define WIFI_RESET_HOLD_MS   5000   // กด SW1 ค้าง 5 วินาที = reset WiFi
+#define WIFI_RESET_HOLD_MS   5000
 
 // ─── Structs ──────────────────────────────────────────────
 struct SwitchState {
@@ -72,8 +78,37 @@ RelayState relay[3] = {
 
 WeatherData weather = {0, 0, 0, 0, false};
 unsigned long lastWeatherFetch = 0;
+bool lastAqiAlertSent = false;   // ป้องกันส่งซ้ำขณะ AQI ยังสูงอยู่
 
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+
+// ─── Telegram Send ────────────────────────────────────────
+void sendTelegram(const String& msg) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = String("https://api.telegram.org/bot") + TG_BOT_TOKEN + "/sendMessage";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  // escape ข้อความเป็น JSON
+  JsonDocument doc;
+  doc["chat_id"] = TG_CHAT_ID;
+  doc["text"]    = msg;
+  doc["parse_mode"] = "HTML";
+
+  String body;
+  serializeJson(doc, body);
+
+  int code = http.POST(body);
+  if (code == HTTP_CODE_OK) {
+    Serial.println("[Telegram] ส่งสำเร็จ");
+  } else {
+    Serial.printf("[Telegram] Error: %d\n", code);
+  }
+  http.end();
+}
 
 // ─── OLED Helpers ─────────────────────────────────────────
 void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "") {
@@ -156,9 +191,13 @@ void drawOLED() {
 }
 
 // ─── Relay Toggle ─────────────────────────────────────────
-void toggleRelay(RelayState &r) {
+void toggleRelay(RelayState &r, int index) {
   r.on = !r.on;
   digitalWrite(r.pin, r.on ? RELAY_ON : RELAY_OFF);
+
+  String msg = String("🔌 <b>Relay") + (index + 1) + "</b> ";
+  msg += r.on ? "เปิด (ON) ✅" : "ปิด (OFF) ⛔";
+  sendTelegram(msg);
 }
 
 // ─── Weather Fetch ────────────────────────────────────────
@@ -224,9 +263,44 @@ void fetchWeather() {
     Serial.printf("  PM2.5       : %.1f µg/m³\n", weather.pm25);
     Serial.printf("  PM10        : %.1f µg/m³\n", pm10);
     Serial.printf("  CO          : %.1f µg/m³\n", co);
-    Serial.printf("  NO₂         : %.1f µg/m³\n", no2);
-    Serial.printf("  O₃          : %.1f µg/m³\n", o3);
+    Serial.printf("  NO2         : %.1f µg/m³\n", no2);
+    Serial.printf("  O3          : %.1f µg/m³\n", o3);
     Serial.println("================================================");
+
+    // ── ส่งรายงานอากาศทุก 2 นาที ──
+    const char* aqiLabelTH[] = {"", "ดี", "พอใช้", "ปานกลาง", "แย่", "แย่มาก"};
+    String weatherMsg =
+      String("🌤 <b>สภาพอากาศ ") + OWM_CITY + "</b>\n" +
+      "🌡 อุณหภูมิ : <b>" + String(weather.temp, 1) + " °C</b>\n" +
+      "💧 ความชื้น : <b>" + weather.humidity + " %</b>\n" +
+      "🌬 AQI      : <b>" + weather.aqi +
+      (weather.aqi >= 1 && weather.aqi <= 5 ? String(" (") + aqiLabelTH[weather.aqi] + ")" : "") + "</b>\n" +
+      "🏭 PM2.5   : <b>" + String(weather.pm25, 1) + " µg/m³</b>\n" +
+      "🏭 PM10    : <b>" + String(pm10, 1) + " µg/m³</b>";
+    sendTelegram(weatherMsg);
+
+    // ── แจ้งเตือนเมื่อ AQI หรือ PM2.5 เกินค่ากำหนด ──
+    bool aqiBad  = weather.aqi  >= AQI_ALERT_THRESHOLD;
+    bool pm25Bad = weather.pm25 >= PM25_ALERT_THRESHOLD;
+
+    if ((aqiBad || pm25Bad) && !lastAqiAlertSent) {
+      String alertMsg = "⚠️ <b>แจ้งเตือนคุณภาพอากาศ!</b>\n";
+      if (aqiBad)  alertMsg += "🔴 AQI: <b>"   + String(weather.aqi)        + "</b> (เกินระดับ " + AQI_ALERT_THRESHOLD + ")\n";
+      if (pm25Bad) alertMsg += "🔴 PM2.5: <b>" + String(weather.pm25, 1)    + " µg/m³</b> (เกิน " + String(PM25_ALERT_THRESHOLD, 0) + ")\n";
+      alertMsg += "📍 " + String(OWM_CITY);
+      sendTelegram(alertMsg);
+      lastAqiAlertSent = true;
+    }
+
+    // รีเซ็ต flag เมื่อคุณภาพอากาศกลับสู่ปกติ
+    if (!aqiBad && !pm25Bad) {
+      if (lastAqiAlertSent) {
+        sendTelegram("✅ <b>คุณภาพอากาศกลับสู่ปกติ</b>\nAQI: " + String(weather.aqi) +
+                     "  PM2.5: " + String(weather.pm25, 1) + " µg/m³");
+      }
+      lastAqiAlertSent = false;
+    }
+
   } else {
     Serial.printf("[AQI] HTTP error: %d\n", code);
   }
@@ -239,9 +313,8 @@ void fetchWeather() {
 void checkWiFiResetButton() {
   pinMode(SW1, INPUT);
 
-  if (digitalRead(SW1) == HIGH) return;  // ไม่ได้กด ข้ามไป
+  if (digitalRead(SW1) == HIGH) return;
 
-  // กดอยู่ — นับถอยหลัง 5 วินาทีบน OLED
   Serial.println("[WiFi] SW1 ถูกกด — รอ 5 วินาทีเพื่อ reset WiFi...");
   unsigned long pressStart = millis();
 
@@ -257,7 +330,6 @@ void checkWiFiResetButton() {
     display.setCursor(10, 22);
     display.print("WiFi settings...");
 
-    // Progress bar
     int progress = map(held, 0, WIFI_RESET_HOLD_MS, 0, SCREEN_W - 4);
     display.drawRect(2, 38, SCREEN_W - 4, 10, SSD1306_WHITE);
     display.fillRect(2, 38, progress, 10, SSD1306_WHITE);
@@ -268,7 +340,6 @@ void checkWiFiResetButton() {
     display.display();
 
     if (held >= WIFI_RESET_HOLD_MS) {
-      // ค้างครบ 5 วินาที — ทำ reset
       Serial.println("[WiFi] Reset WiFi credentials!");
       oledMsg("WiFi Reset!", "Restarting...", "Connect to AP:");
       delay(1500);
@@ -280,7 +351,6 @@ void checkWiFiResetButton() {
     }
   }
 
-  // ปล่อยปุ่มก่อน 5 วินาที — ยกเลิก
   Serial.println("[WiFi] ปล่อยปุ่มก่อนครบ — ยกเลิก reset");
   display.clearDisplay();
   display.display();
@@ -295,17 +365,14 @@ void setup() {
     Serial.println("[OLED] ไม่พบจอ — ตรวจสอบการต่อสาย");
   }
 
-  // ตรวจสอบการกด SW1 ก่อน connect WiFi
   checkWiFiResetButton();
 
-  // ── WiFiManager: เชื่อมต่ออัตโนมัติ หรือเปิด AP portal ──
   oledMsg("Connecting WiFi...", "If fail, connect to:", "ESP32-Setup");
 
   WiFiManager wm;
-  wm.setConnectTimeout(20);       // รอ connect 20 วินาที
-  wm.setConfigPortalTimeout(120); // AP portal หมดเวลา 120 วินาที
+  wm.setConnectTimeout(20);
+  wm.setConfigPortalTimeout(120);
 
-  // callback เมื่อเข้า AP config mode
   wm.setAPCallback([](WiFiManager* wm) {
     Serial.println("[WiFi] เปิด Config Portal — SSID: ESP32-Setup");
     oledMsg("WiFi Config Mode", "Connect to WiFi:", ">> ESP32-Setup <<");
@@ -318,8 +385,18 @@ void setup() {
     ESP.restart();
   }
 
-  Serial.printf("[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
-  oledMsg("WiFi Connected!", WiFi.localIP().toString().c_str());
+  String ip = WiFi.localIP().toString();
+  Serial.printf("[WiFi] Connected — IP: %s\n", ip.c_str());
+  oledMsg("WiFi Connected!", ip.c_str());
+
+  // แจ้งเตือน Telegram ว่าบอร์ด online
+  sendTelegram(
+    String("✅ <b>ESP32 Online</b>\n") +
+    "📡 IP: <b>" + ip + "</b>\n" +
+    "📍 " + OWM_CITY + "\n" +
+    "🔌 Relay: R1=OFF  R2=OFF  R3=OFF"
+  );
+
   delay(1000);
 
   for (int i = 0; i < 3; i++) {
@@ -340,9 +417,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // --- Switch debounce & relay toggle (SW2, SW3 เท่านั้น) ---
-  // SW1 (index 0) ใช้เป็น WiFi reset — toggle relay เฉพาะ SW2, SW3
   bool relayChanged = false;
+
+  // SW2, SW3 — toggle Relay2, Relay3
   for (int i = 1; i < 3; i++) {
     bool raw = digitalRead(sw[i].pin);
 
@@ -354,14 +431,14 @@ void loop() {
     if ((now - sw[i].lastChangeTime) >= DEBOUNCE_MS && raw != sw[i].stable) {
       sw[i].stable = raw;
       if (sw[i].stable == LOW) {
-        toggleRelay(relay[i]);
+        toggleRelay(relay[i], i);
         relayChanged = true;
         Serial.printf("SW%d กด -> Relay%d %s\n", i + 1, i + 1, relay[i].on ? "ON" : "OFF");
       }
     }
   }
 
-  // SW1 — toggle Relay1 เมื่อกดสั้น (< 5 วินาที)
+  // SW1 — toggle Relay1 (กดสั้น) / ฟังก์ชัน WiFi reset จัดการใน setup แล้ว
   {
     bool raw = digitalRead(sw[0].pin);
     if (raw != sw[0].lastRaw) {
@@ -370,14 +447,10 @@ void loop() {
     }
     if ((now - sw[0].lastChangeTime) >= DEBOUNCE_MS && raw != sw[0].stable) {
       sw[0].stable = raw;
-      if (sw[0].stable == LOW) {
-        // บันทึกเวลาที่เริ่มกด (จัดการโดย lastChangeTime แล้ว)
-      }
       if (sw[0].stable == HIGH) {
-        // ปล่อยปุ่ม — ตรวจว่ากดสั้นหรือยาว
         unsigned long holdTime = now - sw[0].lastChangeTime;
         if (holdTime < WIFI_RESET_HOLD_MS) {
-          toggleRelay(relay[0]);
+          toggleRelay(relay[0], 0);
           relayChanged = true;
           Serial.printf("SW1 กด -> Relay1 %s\n", relay[0].on ? "ON" : "OFF");
         }
@@ -387,7 +460,7 @@ void loop() {
 
   if (relayChanged) drawOLED();
 
-  // --- Weather fetch ทุก 2 นาที ---
+  // Weather fetch ทุก 2 นาที
   if (now - lastWeatherFetch >= WEATHER_INTERVAL_MS) {
     lastWeatherFetch = now;
     fetchWeather();

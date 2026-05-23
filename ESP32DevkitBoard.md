@@ -379,20 +379,83 @@ void setup() {
 - ใช้ USB adapter 5V/1A ขึ้นไป
 - หรือ external regulated 3.3V ที่ให้กระแส 500mA ขึ้นไป
 
+### Telegram Bot Notification
+
+ใช้ Telegram Bot API ผ่าน HTTPS เพื่อส่งการแจ้งเตือนจาก ESP32 โดยไม่ต้องติดตั้ง library เพิ่ม (ใช้ HTTPClient + ArduinoJson ที่มีอยู่แล้ว)
+
+**เหตุการณ์ที่แจ้งเตือน**:
+
+| เหตุการณ์ | ข้อความ |
+|----------|--------|
+| บอร์ด Online | `✅ ESP32 Online` + IP Address |
+| Relay ON/OFF | `🔌 Relay1 เปิด (ON) ✅` |
+| อัปเดตอากาศ | Temp, Hum, AQI, PM2.5, PM10 ทุก 2 นาที |
+| AQI/PM2.5 เกิน | `⚠️ แจ้งเตือนคุณภาพอากาศ!` |
+| อากาศกลับปกติ | `✅ คุณภาพอากาศกลับสู่ปกติ` |
+
+**การตั้งค่าใน Code**:
+```cpp
+#define TG_BOT_TOKEN         "your_bot_token"  // จาก @BotFather
+#define TG_CHAT_ID           "your_chat_id"    // Chat ID ของคุณ
+#define AQI_ALERT_THRESHOLD  3                 // AQI >= ค่านี้ = แจ้งเตือน
+#define PM25_ALERT_THRESHOLD 35.0f             // PM2.5 >= ค่านี้ = แจ้งเตือน
+```
+
+**วิธีสร้าง Bot**:
+1. คุยกับ **@BotFather** → `/newbot` → รับ Token
+2. ส่งข้อความให้ Bot แล้วเปิด `https://api.telegram.org/bot<TOKEN>/getUpdates` เพื่อหา Chat ID
+
+**ฟังก์ชัน sendTelegram()**:
+```cpp
+void sendTelegram(const String& msg) {
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + String(TG_BOT_TOKEN) + "/sendMessage";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  // ส่ง JSON: chat_id, text, parse_mode: HTML
+  http.POST(body);
+  http.end();
+}
+```
+
+⚠️ **ข้อควรระวัง - Telegram**:
+- Bot Token และ Chat ID เป็นข้อมูลลับ — ไม่ควร commit ขึ้น git สาธารณะ
+- Telegram API ใช้ HTTPS — ESP32 ต้องเชื่อมต่อ Internet ได้
+- Rate limit: 30 msg/วินาที (โปรเจคนี้ส่งน้อยมาก ไม่มีปัญหา)
+
+---
+
 ## ซอฟต์แวร์และไลบรารี่
 
 ### Core Libraries (มีมาตามค่าเริ่มต้น)
 - Arduino.h
 - WiFi.h
+- HTTPClient.h
+- Wire.h (I2C)
 - BLEDevice.h
 - SPIFFS.h
-- SD.h
 
-### ทั่วไปที่ใช้
-- ArduinoJson
-- ESP8266WebServer (modified for ESP32)
-- DHT sensor library
-- Adafruit libraries
+### Libraries ที่ใช้ในโปรเจคนี้ (platformio.ini)
+
+| Library | Version | หน้าที่ |
+|---------|---------|--------|
+| `bblanchon/ArduinoJson` | ^7.0.0 | Parse และสร้าง JSON |
+| `adafruit/Adafruit SSD1306` | ^2.5.7 | OLED display driver |
+| `adafruit/Adafruit GFX Library` | ^1.11.9 | Graphics primitives |
+| `tzapu/WiFiManager` | ^2.0.17 | WiFi Captive Portal |
+
+```ini
+[env:esp32doit-devkit-v1]
+platform = espressif32
+board = esp32doit-devkit-v1
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+  bblanchon/ArduinoJson@^7.0.0
+  adafruit/Adafruit SSD1306@^2.5.7
+  adafruit/Adafruit GFX Library@^1.11.9
+  tzapu/WiFiManager@^2.0.17
+```
 
 ## โหมดการสนับสนุน
 
