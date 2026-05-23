@@ -1,14 +1,11 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-
-// --- WiFi ---
-#define WIFI_SSID     "MyHome_2.4G"
-#define WIFI_PASSWORD "0939391546"
 
 // --- OpenWeatherMap API ---
 #define OWM_API_KEY          "1bef650d2c6ea7a91f58252948c2d325"
@@ -36,7 +33,8 @@
 #define SW2 35
 #define SW3 32
 
-#define DEBOUNCE_MS 20
+#define DEBOUNCE_MS          20
+#define WIFI_RESET_HOLD_MS   5000   // กด SW1 ค้าง 5 วินาที = reset WiFi
 
 // ─── Structs ──────────────────────────────────────────────
 struct SwitchState {
@@ -77,7 +75,17 @@ unsigned long lastWeatherFetch = 0;
 
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
-// ─── OLED Draw ────────────────────────────────────────────
+// ─── OLED Helpers ─────────────────────────────────────────
+void oledMsg(const char* line1, const char* line2 = "", const char* line3 = "") {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 10); display.print(line1);
+  display.setCursor(0, 26); display.print(line2);
+  display.setCursor(0, 42); display.print(line3);
+  display.display();
+}
+
 void drawOLED() {
   display.clearDisplay();
 
@@ -91,18 +99,16 @@ void drawOLED() {
   // ── Weather section ──
   display.setTextColor(SSD1306_WHITE);
   if (weather.valid) {
-    // Row 1: Temp & Humidity
     display.setCursor(0, 12);
     display.print("T:");
     display.print(weather.temp, 1);
-    display.print("\xF8""C");   // degree symbol
+    display.print("\xF8""C");
 
     display.setCursor(68, 12);
     display.print("H:");
     display.print(weather.humidity);
     display.print("%");
 
-    // Row 2: AQI & PM2.5
     const char* aqiLabel[] = {"", "Good", "Fair", "Mod", "Poor", "VPoor"};
     display.setCursor(0, 23);
     display.print("AQI:");
@@ -124,17 +130,14 @@ void drawOLED() {
   // ── Divider ──
   display.drawLine(0, 34, SCREEN_W - 1, 34, SSD1306_WHITE);
 
-  // ── Relay section label ──
+  // ── Relay section ──
   display.setCursor(0, 37);
   display.print("RELAY:");
 
-  // ── Relay status boxes ──
-  // แต่ละกล่อง: R1 x=0, R2 x=43, R3 x=86  ที่ y=48
   const char* rLabel[] = {"R1", "R2", "R3"};
   for (int i = 0; i < 3; i++) {
     int bx = i * 43;
     if (relay[i].on) {
-      // กล่องขาว = ON
       display.fillRoundRect(bx, 47, 40, 14, 3, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
       display.setCursor(bx + 3, 50);
@@ -142,7 +145,6 @@ void drawOLED() {
       display.print(":ON");
       display.setTextColor(SSD1306_WHITE);
     } else {
-      // กล่องเส้นขอบ = OFF
       display.drawRoundRect(bx, 47, 40, 14, 3, SSD1306_WHITE);
       display.setCursor(bx + 2, 50);
       display.print(rLabel[i]);
@@ -233,6 +235,57 @@ void fetchWeather() {
   drawOLED();
 }
 
+// ─── WiFi Reset Check (กด SW1 ค้าง 5 วินาทีใน setup) ──────
+void checkWiFiResetButton() {
+  pinMode(SW1, INPUT);
+
+  if (digitalRead(SW1) == HIGH) return;  // ไม่ได้กด ข้ามไป
+
+  // กดอยู่ — นับถอยหลัง 5 วินาทีบน OLED
+  Serial.println("[WiFi] SW1 ถูกกด — รอ 5 วินาทีเพื่อ reset WiFi...");
+  unsigned long pressStart = millis();
+
+  while (digitalRead(SW1) == LOW) {
+    unsigned long held = millis() - pressStart;
+    int remaining = 5 - (held / 1000);
+
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    display.setCursor(10, 8);
+    display.print("Hold SW1 to reset");
+    display.setCursor(10, 22);
+    display.print("WiFi settings...");
+
+    // Progress bar
+    int progress = map(held, 0, WIFI_RESET_HOLD_MS, 0, SCREEN_W - 4);
+    display.drawRect(2, 38, SCREEN_W - 4, 10, SSD1306_WHITE);
+    display.fillRect(2, 38, progress, 10, SSD1306_WHITE);
+
+    display.setTextSize(2);
+    display.setCursor(52, 50);
+    display.print(max(remaining, 0));
+    display.display();
+
+    if (held >= WIFI_RESET_HOLD_MS) {
+      // ค้างครบ 5 วินาที — ทำ reset
+      Serial.println("[WiFi] Reset WiFi credentials!");
+      oledMsg("WiFi Reset!", "Restarting...", "Connect to AP:");
+      delay(1500);
+
+      WiFiManager wm;
+      wm.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+  }
+
+  // ปล่อยปุ่มก่อน 5 วินาที — ยกเลิก
+  Serial.println("[WiFi] ปล่อยปุ่มก่อนครบ — ยกเลิก reset");
+  display.clearDisplay();
+  display.display();
+}
+
 // ─── Setup ────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -240,22 +293,34 @@ void setup() {
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
     Serial.println("[OLED] ไม่พบจอ — ตรวจสอบการต่อสาย");
-  } else {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(20, 20);
-    display.print("Connecting WiFi...");
-    display.display();
   }
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("Connecting to WiFi: %s", WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // ตรวจสอบการกด SW1 ก่อน connect WiFi
+  checkWiFiResetButton();
+
+  // ── WiFiManager: เชื่อมต่ออัตโนมัติ หรือเปิด AP portal ──
+  oledMsg("Connecting WiFi...", "If fail, connect to:", "ESP32-Setup");
+
+  WiFiManager wm;
+  wm.setConnectTimeout(20);       // รอ connect 20 วินาที
+  wm.setConfigPortalTimeout(120); // AP portal หมดเวลา 120 วินาที
+
+  // callback เมื่อเข้า AP config mode
+  wm.setAPCallback([](WiFiManager* wm) {
+    Serial.println("[WiFi] เปิด Config Portal — SSID: ESP32-Setup");
+    oledMsg("WiFi Config Mode", "Connect to WiFi:", ">> ESP32-Setup <<");
+  });
+
+  if (!wm.autoConnect("ESP32-Setup")) {
+    Serial.println("[WiFi] เชื่อมต่อไม่สำเร็จ — restart");
+    oledMsg("WiFi Failed!", "Restarting...");
+    delay(2000);
+    ESP.restart();
   }
-  Serial.printf("\nWiFi connected — IP: %s\n", WiFi.localIP().toString().c_str());
+
+  Serial.printf("[WiFi] Connected — IP: %s\n", WiFi.localIP().toString().c_str());
+  oledMsg("WiFi Connected!", WiFi.localIP().toString().c_str());
+  delay(1000);
 
   for (int i = 0; i < 3; i++) {
     pinMode(relay[i].pin, OUTPUT);
@@ -266,8 +331,8 @@ void setup() {
     pinMode(sw[i].pin, INPUT);
   }
 
-  drawOLED();           // แสดง "Fetching weather..." บน OLED
-  fetchWeather();       // ดึงข้อมูลทันที
+  drawOLED();
+  fetchWeather();
   lastWeatherFetch = millis();
 }
 
@@ -275,9 +340,10 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // --- Switch debounce & relay toggle ---
+  // --- Switch debounce & relay toggle (SW2, SW3 เท่านั้น) ---
+  // SW1 (index 0) ใช้เป็น WiFi reset — toggle relay เฉพาะ SW2, SW3
   bool relayChanged = false;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 1; i < 3; i++) {
     bool raw = digitalRead(sw[i].pin);
 
     if (raw != sw[i].lastRaw) {
@@ -295,7 +361,31 @@ void loop() {
     }
   }
 
-  if (relayChanged) drawOLED();  // อัปเดต OLED ทันทีเมื่อ relay เปลี่ยน
+  // SW1 — toggle Relay1 เมื่อกดสั้น (< 5 วินาที)
+  {
+    bool raw = digitalRead(sw[0].pin);
+    if (raw != sw[0].lastRaw) {
+      sw[0].lastRaw = raw;
+      sw[0].lastChangeTime = now;
+    }
+    if ((now - sw[0].lastChangeTime) >= DEBOUNCE_MS && raw != sw[0].stable) {
+      sw[0].stable = raw;
+      if (sw[0].stable == LOW) {
+        // บันทึกเวลาที่เริ่มกด (จัดการโดย lastChangeTime แล้ว)
+      }
+      if (sw[0].stable == HIGH) {
+        // ปล่อยปุ่ม — ตรวจว่ากดสั้นหรือยาว
+        unsigned long holdTime = now - sw[0].lastChangeTime;
+        if (holdTime < WIFI_RESET_HOLD_MS) {
+          toggleRelay(relay[0]);
+          relayChanged = true;
+          Serial.printf("SW1 กด -> Relay1 %s\n", relay[0].on ? "ON" : "OFF");
+        }
+      }
+    }
+  }
+
+  if (relayChanged) drawOLED();
 
   // --- Weather fetch ทุก 2 นาที ---
   if (now - lastWeatherFetch >= WEATHER_INTERVAL_MS) {
