@@ -186,6 +186,114 @@ void loop() {
 - Relay JD-VCC ต้องเชื่อมต่อกับ 5V เสมอ
 - ใช้ Diode protection สำหรับ relay coil
 
+### Switch Module (โมดูลสวิตช์)
+**หมายเหตุ**: ทั้งหมด 3 สวิตช์ใช้แบบ **Active Low** (กดปุ่ม = LOW) และมี **External Pull-up**
+
+| Switch | GPIO Pin | ประเภท | คำอธิบาย |
+|--------|----------|--------|----------|
+| SW1 | GPIO 34 | Active Low + Pull-up | ปุ่มกดเมื่อ GPIO34 = LOW |
+| SW2 | GPIO 35 | Active Low + Pull-up | ปุ่มกดเมื่อ GPIO35 = LOW |
+| SW3 | GPIO 32 | Active Low + Pull-up | ปุ่มกดเมื่อ GPIO32 = LOW |
+
+**วิธีการอ่านค่า**:
+```cpp
+// อ่านสถานะปุ่ม
+int sw1_state = digitalRead(34);  // LOW = pressed, HIGH = released
+int sw2_state = digitalRead(35);  // LOW = pressed, HIGH = released
+int sw3_state = digitalRead(32);  // LOW = pressed, HIGH = released
+
+// ตรวจสอบการกดปุ่ม
+if (digitalRead(34) == LOW) {
+  // SW1 pressed
+}
+```
+
+**การเชื่อมต่อ**:
+```
+SW1 Switch One Side ── GPIO 34
+SW1 Switch Other Side ── 3.3V (External Pull-up 10kΩ)
+
+SW2 Switch One Side ── GPIO 35
+SW2 Switch Other Side ── 3.3V (External Pull-up 10kΩ)
+
+SW3 Switch One Side ── GPIO 32
+SW3 Switch Other Side ── 3.3V (External Pull-up 10kΩ)
+```
+
+**Wiring Diagram**:
+```
+3.3V ──[10kΩ]──┬── GPIO 34 (SW1)
+               │
+SW1 Button ────┘
+               
+3.3V ──[10kΩ]──┬── GPIO 35 (SW2)
+               │
+SW2 Button ────┘
+               
+3.3V ──[10kΩ]──┬── GPIO 32 (SW3)
+               │
+SW3 Button ────┘
+
+GND ── (common for all switches when pressed)
+```
+
+**ตัวอย่าง Setup Code**:
+```cpp
+#include <Arduino.h>
+
+const int SW1_PIN = 34;
+const int SW2_PIN = 35;
+const int SW3_PIN = 32;
+
+void setup() {
+  // ตั้งค่า pins เป็น INPUT (มี pull-up ภายนอก)
+  pinMode(SW1_PIN, INPUT);
+  pinMode(SW2_PIN, INPUT);
+  pinMode(SW3_PIN, INPUT);
+  
+  Serial.begin(115200);
+  Serial.println("Switch Control System Started");
+}
+
+void loop() {
+  int sw1 = digitalRead(SW1_PIN);
+  int sw2 = digitalRead(SW2_PIN);
+  int sw3 = digitalRead(SW3_PIN);
+  
+  // ตรวจสอบ SW1
+  if (sw1 == LOW) {
+    Serial.println("SW1 Pressed!");
+    delay(50);  // Debounce delay
+    while (digitalRead(SW1_PIN) == LOW);
+    delay(50);
+  }
+  
+  // ตรวจสอบ SW2
+  if (sw2 == LOW) {
+    Serial.println("SW2 Pressed!");
+    delay(50);
+    while (digitalRead(SW2_PIN) == LOW);
+    delay(50);
+  }
+  
+  // ตรวจสอบ SW3
+  if (sw3 == LOW) {
+    Serial.println("SW3 Pressed!");
+    delay(50);
+    while (digitalRead(SW3_PIN) == LOW);
+    delay(50);
+  }
+  
+  delay(10);
+}
+```
+
+⚠️ **ข้อควรระวัง - Switch**:
+- External Pull-up ต้องเชื่อมต่ออยู่แล้ว (ไม่ต้องเปิด Internal Pull-up)
+- GPIO 34, 35, 32 เป็น Input-only pins (ไม่มี output capability)
+- ต้องใช้ Debouncing เพื่อหลีกเลี่ยง Switch Bounce
+- มีค่า Pull-up External 10kΩ
+
 ## ข้อมูลการไฟ (Power)
 
 ### Power Consumption
