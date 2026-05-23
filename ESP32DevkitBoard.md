@@ -294,6 +294,80 @@ void loop() {
 - ต้องใช้ Debouncing เพื่อหลีกเลี่ยง Switch Bounce
 - มีค่า Pull-up External 10kΩ
 
+### OLED Display 0.96" (I2C)
+**หมายเหตุ**: จอ OLED 0.96 นิ้ว ความละเอียด 128x64 pixels ใช้โปรโตคอล I2C (SSD1306 driver)
+
+| Pin OLED | GPIO ESP32 | คำอธิบาย |
+|----------|------------|----------|
+| VCC      | 3.3V       | ไฟเลี้ยง 3.3V |
+| GND      | GND        | กราวด์ |
+| SDA      | GPIO 21    | I2C Data |
+| SCL      | GPIO 22    | I2C Clock |
+
+**I2C Address**: `0x3C` (ค่าเริ่มต้น) หรือ `0x3D` (ขึ้นกับ hardware)
+
+**การเชื่อมต่อ**:
+```
+OLED VCC  ── 3.3V
+OLED GND  ── GND
+OLED SDA  ── GPIO 21 (SDA)
+OLED SCL  ── GPIO 22 (SCL)
+```
+
+**Wiring Diagram**:
+```
+ESP32          OLED 0.96"
+3.3V  ─────── VCC
+GND   ─────── GND
+GPIO21 ─────── SDA
+GPIO22 ─────── SCL
+```
+
+**Library ที่ใช้** (เพิ่มใน platformio.ini):
+```ini
+lib_deps =
+  adafruit/Adafruit SSD1306@^2.5.7
+  adafruit/Adafruit GFX Library@^1.11.9
+```
+
+**ตัวอย่าง Setup Code**:
+```cpp
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define OLED_ADDRESS  0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+void setup() {
+  Wire.begin(21, 22);  // SDA=21, SCL=22
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+    Serial.println("OLED not found!");
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Hello ESP32!");
+  display.display();
+}
+```
+
+⚠️ **ข้อควรระวัง - OLED**:
+- ใช้ไฟ 3.3V เท่านั้น (ห้ามต่อ 5V โดยตรง)
+- I2C ใช้ GPIO 21 (SDA) และ GPIO 22 (SCL) ร่วมกับอุปกรณ์ I2C ตัวอื่นได้
+- ถ้ามีหลาย I2C device ต้องมี I2C address ต่างกัน
+- ควรมี Pull-up resistor 4.7kΩ บน SDA และ SCL (บางโมดูลมีในตัวแล้ว)
+
+---
+
 ## ข้อมูลการไฟ (Power)
 
 ### Power Consumption
