@@ -1,6 +1,6 @@
 # ESP32 Smart Relay & Weather Monitor
 
-โปรเจค IoT บน ESP32 สำหรับควบคุม Relay 3 ตัวด้วยปุ่มกด แสดงสภาพอากาศและคุณภาพอากาศแบบ Real-time จาก OpenWeatherMap บนจอ OLED 0.96 นิ้ว และแจ้งเตือนผ่าน Telegram Bot
+โปรเจค IoT บน ESP32 สำหรับควบคุม Relay 3 ตัวด้วยปุ่มกด แสดงเวลาจริงจาก NTP, สภาพอากาศและคุณภาพอากาศจาก OpenWeatherMap บนจอ OLED 0.96 นิ้ว พร้อมแจ้งเตือนผ่าน Telegram และเชื่อมต่อ MQTT Broker (HiveMQ)
 
 ---
 
@@ -14,6 +14,8 @@
 - [การตั้งค่า WiFi ครั้งแรก](#การตั้งค่า-wifi-ครั้งแรก)
 - [การ Reset WiFi](#การ-reset-wifi)
 - [การตั้งค่า Telegram Bot](#การตั้งค่า-telegram-bot)
+- [NTP เวลาจริง](#ntp-เวลาจริง)
+- [MQTT (HiveMQ)](#mqtt-hivemq)
 - [Layout หน้าจอ OLED](#layout-หน้าจอ-oled)
 - [การทำงานของปุ่ม Switch](#การทำงานของปุ่ม-switch)
 - [การแจ้งเตือน Telegram](#การแจ้งเตือน-telegram)
@@ -30,11 +32,15 @@
 |--------|-----------|
 | ควบคุม Relay | 3 ตัว Toggle ON/OFF ด้วยปุ่ม SW1–SW3 |
 | WiFi Manager | ตั้งค่า WiFi ผ่าน Captive Portal — ไม่ต้อง hardcode |
+| NTP เวลาจริง | ซิงค์เวลาจาก `pool.ntp.org` timezone **Asia/Bangkok (UTC+7)** |
 | สภาพอากาศ | อุณหภูมิ, ความชื้น, ความเร็วลม จาก OpenWeatherMap |
 | คุณภาพอากาศ | AQI, PM2.5, PM10, CO, NO₂, O₃ |
 | อัปเดตอัตโนมัติ | ดึงข้อมูลใหม่ทุก **2 นาที** |
-| จอ OLED | แสดงผล 128×64 pixels แบบ I2C (SSD1306) |
+| จอ OLED | แสดงเวลา, อากาศ, สถานะ Relay + indicator MQTT |
 | Telegram แจ้งเตือน | Online, Relay ON/OFF, รายงานอากาศ, แจ้งเตือน AQI/PM2.5 |
+| MQTT Telemetry | Publish weather, relay state, status ไปยัง HiveMQ |
+| MQTT Control | Subscribe รับคำสั่ง ON/OFF relay จากภายนอก |
+| LWT | Broker แจ้ง offline อัตโนมัติเมื่อบอร์ดหลุด |
 | WiFi Reset | กด SW1 ค้าง **5 วินาที** ขณะ boot เพื่อล้าง WiFi |
 | Debounce | ป้องกัน Switch Bounce ด้วย millis() 20ms |
 | Serial Debug | แสดงข้อมูลทั้งหมดผ่าน Serial Monitor 115200 baud |
@@ -80,21 +86,18 @@ Relay GND    ── GND
 | SW3 | GPIO **32** | Toggle Relay3 | — |
 
 ```
-3.3V ──[10kΩ]──┬── GPIO34 (SW1)    3.3V ──[10kΩ]──┬── GPIO35 (SW2)
-               └── SW1 ── GND                      └── SW2 ── GND
-
-3.3V ──[10kΩ]──┬── GPIO32 (SW3)
-               └── SW3 ── GND
+3.3V ──[10kΩ]──┬── GPIO34 (SW1)
+               └── SW1 ── GND
 ```
 
-> GPIO 34 และ 35 เป็น **Input-Only** — ไม่มี Internal Pull-up ต้องใช้ External 10kΩ เสมอ
+> GPIO 34 และ 35 เป็น **Input-Only** — ต้องใช้ External Pull-up 10kΩ เสมอ
 
 ### OLED 0.96" I2C (SSD1306)
 
 | OLED | GPIO ESP32 | หมายเหตุ |
 |------|------------|---------|
-| VCC  | 3.3V       | ห้ามต่อ 5V |
-| GND  | GND        | |
+| VCC  | 3.3V | ห้ามต่อ 5V |
+| GND  | GND | |
 | SDA  | GPIO **21** | I2C Data |
 | SCL  | GPIO **22** | I2C Clock |
 
@@ -110,10 +113,12 @@ Relay GND    ── GND
 | `WiFi.h` | built-in (ESP32) | WiFi stack |
 | `WiFiManager` (tzapu) | ^2.0.17 | Captive Portal ตั้งค่า WiFi |
 | `HTTPClient.h` | built-in (ESP32) | HTTP GET/POST |
-| `ArduinoJson` (bblanchon) | ^7.0.0 | Parse JSON / build JSON |
+| `ArduinoJson` (bblanchon) | ^7.0.0 | Parse/Build JSON |
 | `Wire.h` | built-in | I2C protocol |
+| `time.h` | built-in (ESP32) | NTP sync + `getLocalTime()` |
 | `Adafruit SSD1306` | ^2.5.7 | ควบคุม OLED display |
 | `Adafruit GFX Library` | ^1.11.9 | Graphics primitives |
+| `PubSubClient` (knolleary) | ^2.8 | MQTT client |
 
 > PlatformIO ดาวน์โหลด library ทั้งหมดอัตโนมัติจาก `platformio.ini`
 
@@ -130,13 +135,9 @@ Relay GND    ── GND
 ### ขั้นตอน
 
 **1. ติดตั้ง PlatformIO IDE**
-
-- เปิด VS Code → `Ctrl+Shift+X`
-- ค้นหา `PlatformIO IDE` → Install
-- Restart VS Code หลังติดตั้ง
+- เปิด VS Code → `Ctrl+Shift+X` → ค้นหา `PlatformIO IDE` → Install → Restart VS Code
 
 **2. เปิด Project**
-
 ```
 File → Open Folder → เลือกโฟลเดอร์ ESP32-FirstProject-with-AI
 ```
@@ -145,21 +146,17 @@ File → Open Folder → เลือกโฟลเดอร์ ESP32-FirstProj
 
 | บรรทัด | define | ค่าที่ต้องแก้ |
 |--------|--------|-------------|
-| 11 | `OWM_API_KEY` | API Key จาก openweathermap.org |
-| 17 | `TG_BOT_TOKEN` | Token จาก @BotFather |
-| 18 | `TG_CHAT_ID` | Chat ID ของคุณ |
+| 17 | `OWM_API_KEY` | API Key จาก openweathermap.org |
+| 23 | `TG_BOT_TOKEN` | Token จาก @BotFather |
+| 24 | `TG_CHAT_ID` | Chat ID ของคุณ |
+| 31 | `BOARD_ID` | ชื่อ unique ของบอร์ดนี้ |
 
 **4. Build และ Upload**
-
-- กดปุ่ม **Build** (✓) ที่ Status Bar เพื่อตรวจสอบ
-- เชื่อมต่อ ESP32 ผ่าน USB
-- กดปุ่ม **Upload** (→) ที่ Status Bar
+- กด **Build** (✓) → กด **Upload** (→) ที่ Status Bar
 - shortcut: `Ctrl+Alt+U`
-
-> หาก Upload ไม่ได้ → กดปุ่ม **BOOT** บนบอร์ดค้างไว้ระหว่าง Upload
+- หาก Upload ไม่ได้ → กด **BOOT** บนบอร์ดค้างไว้ระหว่าง Upload
 
 **5. เปิด Serial Monitor**
-
 - กดไอคอนปลั๊กที่ Status Bar หรือ `Ctrl+Alt+S`
 - Baud: **115200**
 
@@ -167,32 +164,21 @@ File → Open Folder → เลือกโฟลเดอร์ ESP32-FirstProj
 
 ## การตั้งค่า WiFi ครั้งแรก
 
-เมื่อบอร์ดยังไม่มีข้อมูล WiFi บันทึกไว้:
-
 1. OLED แสดง `Connecting WiFi... / Connect to: ESP32-Setup`
-2. ESP32 เปิด Access Point ชื่อ **"ESP32-Setup"**
+2. ESP32 เปิด AP ชื่อ **"ESP32-Setup"**
 3. เชื่อมต่อ WiFi **"ESP32-Setup"** ด้วยมือถือหรือคอมพิวเตอร์
-4. Browser เปิด Captive Portal อัตโนมัติ (หรือเปิด `http://192.168.4.1`)
-5. กด **Configure WiFi** → เลือก SSID → ใส่ Password → **Save**
-6. ESP32 restart และเชื่อมต่อ WiFi อัตโนมัติ
-7. Telegram ได้รับข้อความ `✅ ESP32 Online` พร้อม IP Address
+4. เปิด `http://192.168.4.1` → **Configure WiFi** → เลือก SSID → ใส่ Password → **Save**
+5. ESP32 restart และเชื่อมต่อ WiFi อัตโนมัติ
+6. Telegram ได้รับ `✅ ESP32 Online` พร้อม IP + สถานะ MQTT
 
-> WiFi credentials บันทึกใน Flash — ไม่หายเมื่อปิดไฟ
 > AP Portal หมดเวลาใน **120 วินาที** แล้ว ESP32 จะ restart ใหม่
 
 ---
 
 ## การ Reset WiFi
 
-ใช้เมื่อต้องการเปลี่ยน WiFi หรือแก้ปัญหาการเชื่อมต่อ:
-
-1. **กด SW1 ค้างไว้ขณะบอร์ดกำลัง boot** (ช่วง setup)
-2. OLED แสดง progress bar นับถอยหลัง 5 วินาที:
-   ```
-   Hold SW1 to reset
-   WiFi settings...
-   [████████████░░]  2
-   ```
+1. **กด SW1 ค้างไว้ขณะบอร์ดกำลัง boot**
+2. OLED แสดง progress bar นับถอยหลัง 5 วินาที
 3. ค้างครบ **5 วินาที** → ลบ credentials → restart → เปิด AP Portal ใหม่
 4. ปล่อยก่อน 5 วินาที → ยกเลิก บูตตามปกติ
 
@@ -201,21 +187,14 @@ File → Open Folder → เลือกโฟลเดอร์ ESP32-FirstProj
 ## การตั้งค่า Telegram Bot
 
 ### สร้าง Bot
-
-1. เปิด Telegram → ค้นหา **@BotFather**
-2. พิมพ์ `/newbot` → ตั้งชื่อ Bot → รับ **Bot Token**
+1. เปิด Telegram → คุยกับ **@BotFather** → `/newbot` → รับ **Bot Token**
 
 ### หา Chat ID
-
-1. ส่งข้อความอะไรก็ได้ให้ Bot ของคุณ
-2. เปิด URL ในเบราว์เซอร์:
-   ```
-   https://api.telegram.org/bot<TOKEN>/getUpdates
-   ```
-3. ดูค่า `"id"` ใน `"chat"` — นั่นคือ Chat ID ของคุณ
+1. ส่งข้อความอะไรก็ได้ให้ Bot
+2. เปิด `https://api.telegram.org/bot<TOKEN>/getUpdates`
+3. ดูค่า `"id"` ใน `"chat"`
 
 ### ใส่ค่าใน code
-
 ```cpp
 #define TG_BOT_TOKEN  "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 #define TG_CHAT_ID    "987654321"
@@ -223,31 +202,142 @@ File → Open Folder → เลือกโฟลเดอร์ ESP32-FirstProj
 
 ---
 
+## NTP เวลาจริง
+
+| ค่า | รายละเอียด |
+|-----|-----------|
+| NTP Server | `pool.ntp.org` |
+| Timezone | **Asia/Bangkok** (UTC+7) |
+| UTC Offset | `25200` วินาที (7 × 3600) |
+| DST | `0` (ไทยไม่มี DST) |
+| Retry | สูงสุด 20 ครั้ง (~10 วินาที) |
+| อัปเดต OLED | ทุก **1 วินาที** |
+
+**รูปแบบที่แสดงบน OLED:**
+```
+23/05/2026  14:35:22
+```
+
+---
+
+## MQTT (HiveMQ)
+
+### Broker
+| ค่า | รายละเอียด |
+|-----|-----------|
+| Broker | `broker.hivemq.com` |
+| Port | `1883` (TCP, ไม่เข้ารหัส) |
+| Auth | ไม่ต้อง (HiveMQ Free) |
+| Client ID | `ESP32_{BOARD_ID}_{random_hex}` |
+| Keep Alive | 60 วินาที |
+| Auto-reconnect | ทุก 5 วินาที |
+
+### Topic Schema
+
+```
+esp32/{BOARD_ID}/
+├── telemetry/
+│   ├── status      ← online / offline (LWT)
+│   ├── weather     ← ข้อมูลอากาศ JSON
+│   └── relay       ← สถานะ relay JSON
+└── control/
+    └── relay/
+        ├── 1       ← รับคำสั่ง ON/OFF Relay1
+        ├── 2       ← รับคำสั่ง ON/OFF Relay2
+        └── 3       ← รับคำสั่ง ON/OFF Relay3
+```
+
+### Telemetry Payloads
+
+**`telemetry/status`** (retained):
+```json
+{
+  "board_id": "esp32_nst_01",
+  "status": "online",
+  "ip": "192.168.1.105",
+  "time": "23/05/2026 14:35:22"
+}
+```
+
+**`telemetry/weather`** (retained):
+```json
+{
+  "board_id": "esp32_nst_01",
+  "city": "Nakhon Si Thammarat",
+  "temp": 32.4,
+  "humidity": 78,
+  "aqi": 2,
+  "pm25": 12.3,
+  "pm10": 18.7
+}
+```
+
+**`telemetry/relay`** (retained):
+```json
+{
+  "board_id": "esp32_nst_01",
+  "relay1": false,
+  "relay2": true,
+  "relay3": false
+}
+```
+
+### สั่ง Relay ผ่าน MQTT
+
+Publish ไปยัง `esp32/{BOARD_ID}/control/relay/{1|2|3}`:
+
+| Payload | ผลลัพธ์ |
+|---------|--------|
+| `ON` หรือ `1` หรือ `TRUE` | เปิด Relay |
+| `OFF` หรือ `0` หรือ `FALSE` | ปิด Relay |
+
+**LWT (Last Will Testament):**
+เมื่อบอร์ดหลุดจาก Broker โดยไม่ได้ disconnect ปกติ:
+```json
+{"status": "offline"}
+```
+จะถูก publish ไปยัง `telemetry/status` อัตโนมัติโดย Broker
+
+### OLED Indicator
+- **●** (ขาว ขวาบน) = MQTT Connected
+- **○** (ขอบ ขวาบน) = MQTT Offline
+
+### ทดสอบด้วย MQTT Explorer
+```
+Host:      broker.hivemq.com
+Port:      1883
+Subscribe: esp32/esp32_nst_01/telemetry/#
+Publish:   esp32/esp32_nst_01/control/relay/1
+Payload:   ON
+```
+
+---
+
 ## Layout หน้าจอ OLED
 
-จอ 128×64 pixels แบ่ง 3 โซน:
+จอ 128×64 pixels แบ่ง 5 แถว:
 
 ```
-┌──────────────────────────────┐  ← y=0
-│▓▓ Nakhon Si Thammarat ▓▓▓▓▓▓│  Title bar (พื้นขาว, ตัวดำ)
-│ T:32.4°C         H:78%      │  ← y=12  อุณหภูมิ / ความชื้น
-│ AQI:2(Good)      PM:12.3    │  ← y=23  AQI / PM2.5
-│──────────────────────────────│  ← y=34  เส้นแบ่ง
-│ RELAY:                       │  ← y=37
-│ ╔R1:ON╗  ╔R2:ON╗  [R3:--]   │  ← y=47  กล่อง Relay
-└──────────────────────────────┘  ← y=63
+┌──────────────────────────────●┐  y=0
+│▓▓ Nakhon Si Thammarat ▓▓▓▓▓▓ │  Title bar (ขาว/ดำ)  ●=MQTT status
+│ 23/05/2026  14:35:22          │  y=11  วันที่ + เวลา (NTP)
+│ T:32.4°C         H:78%       │  y=22  อุณหภูมิ / ความชื้น
+│ AQI:2(Good)      PM:12        │  y=33  AQI / PM2.5
+│───────────────────────────────│  y=43  เส้นแบ่ง
+│ ╔R1:ON╗  [R2:--]  [R3:--]    │  y=45  Relay status boxes
+└───────────────────────────────┘  y=63
 ```
 
-**สัญลักษณ์ Relay บน OLED:**
-
-| แสดงผล | ความหมาย |
-|--------|---------|
+| สัญลักษณ์ | ความหมาย |
+|----------|---------|
 | กล่องขาวทึบ `R1:ON` | Relay เปิดอยู่ |
-| กล่องเส้นขอบ `R3:--` | Relay ปิดอยู่ |
+| กล่องเส้นขอบ `R2:--` | Relay ปิดอยู่ |
+| ● (ขวาบน title bar) | MQTT Connected |
+| ○ (ขวาบน title bar) | MQTT Offline |
 
 **ลำดับ Startup:**
 ```
-Connecting WiFi... → WiFi Connected! → Fetching weather... → หน้าหลัก
+Connecting WiFi... → WiFi Connected! → NTP Syncing → MQTT Connect → Fetching weather... → หน้าหลัก
 ```
 
 ---
@@ -260,74 +350,63 @@ Connecting WiFi... → WiFi Connected! → Fetching weather... → หน้า�
 | SW2 | 35 | Toggle Relay2 ON↔OFF | — |
 | SW3 | 32 | Toggle Relay3 ON↔OFF | — |
 
-- Debounce: **20ms** (millis-based, non-blocking)
-- OLED อัปเดตทันทีเมื่อ Relay เปลี่ยน
-- Telegram แจ้งเตือนทุกครั้งที่ Relay เปลี่ยนสถานะ
+- Debounce: **20ms** (non-blocking millis)
+- OLED + MQTT + Telegram อัปเดตทันทีเมื่อ Relay เปลี่ยน
 
 ---
 
 ## การแจ้งเตือน Telegram
 
-| เหตุการณ์ | ตัวอย่างข้อความ |
-|----------|---------------|
-| บอร์ด Online | `✅ ESP32 Online` + IP + ตำแหน่ง |
-| Relay เปลี่ยน | `🔌 Relay1 เปิด (ON) ✅` หรือ `ปิด (OFF) ⛔` |
+| เหตุการณ์ | ข้อความ |
+|----------|--------|
+| บอร์ด Online | `✅ ESP32 Online` + IP + สถานะ MQTT |
+| Relay เปลี่ยน (ปุ่ม) | `🔌 Relay1 เปิด (ON) ✅` |
+| Relay เปลี่ยน (MQTT) | `📡 [MQTT] Relay1 เปิด (ON) ✅` + `สั่งผ่าน MQTT` |
 | อัปเดตอากาศ (ทุก 2 นาที) | Temp, Hum, AQI, PM2.5, PM10 |
 | AQI/PM2.5 เกินค่ากำหนด | `⚠️ แจ้งเตือนคุณภาพอากาศ!` |
 | คุณภาพอากาศกลับปกติ | `✅ คุณภาพอากาศกลับสู่ปกติ` |
 
-**ตัวอย่างข้อความ Telegram:**
-
-```
-🌤 สภาพอากาศ Nakhon Si Thammarat
-🌡 อุณหภูมิ : 32.4 °C
-💧 ความชื้น : 78 %
-🌬 AQI      : 2 (พอใช้)
-🏭 PM2.5   : 12.3 µg/m³
-🏭 PM10    : 18.7 µg/m³
-```
-
-```
-⚠️ แจ้งเตือนคุณภาพอากาศ!
-🔴 AQI: 4 (เกินระดับ 3)
-🔴 PM2.5: 38.5 µg/m³ (เกิน 35)
-📍 Nakhon Si Thammarat
-```
-
-**ค่า Threshold ที่แก้ไขได้:**
-
+**Threshold ที่แก้ได้:**
 ```cpp
-#define AQI_ALERT_THRESHOLD   3      // AQI >= 3 (ปานกลาง) แจ้งเตือน
+#define AQI_ALERT_THRESHOLD   3      // AQI >= 3 แจ้งเตือน
 #define PM25_ALERT_THRESHOLD  35.0f  // PM2.5 >= 35 µg/m³ แจ้งเตือน
 ```
-
-> แจ้งเตือนซ้ำครั้งเดียวต่อเหตุการณ์ — ไม่สแปม ถ้าอากาศยังแย่จะไม่ส่งซ้ำจนกว่าจะกลับปกติแล้วแย่ใหม่
 
 ---
 
 ## การตั้งค่าในโปรแกรม
 
-ไฟล์ [src/main.cpp](src/main.cpp) — ค่าทั้งหมดที่ปรับได้:
+ไฟล์ [src/main.cpp](src/main.cpp):
 
 ```cpp
+// NTP
+#define NTP_SERVER  "pool.ntp.org"
+#define TZ_OFFSET   25200              // UTC+7 Asia/Bangkok
+
 // OpenWeatherMap
-#define OWM_API_KEY          "your_api_key"        // API Key
-#define OWM_CITY             "Nakhon Si Thammarat"  // ชื่อเมือง (ภาษาอังกฤษ)
-#define OWM_COUNTRY          "TH"                   // รหัสประเทศ ISO 3166
-#define WEATHER_INTERVAL_MS  (2UL * 60UL * 1000UL) // รอบดึงข้อมูล (ms)
+#define OWM_API_KEY          "your_api_key"
+#define OWM_CITY             "Nakhon Si Thammarat"
+#define OWM_COUNTRY          "TH"
+#define WEATHER_INTERVAL_MS  (2UL * 60UL * 1000UL)
 
 // Telegram
-#define TG_BOT_TOKEN          "your_bot_token"     // Token จาก @BotFather
-#define TG_CHAT_ID            "your_chat_id"       // Chat ID ของคุณ
-#define AQI_ALERT_THRESHOLD   3                    // AQI ขั้นต่ำที่แจ้งเตือน
-#define PM25_ALERT_THRESHOLD  35.0f                // PM2.5 (µg/m³) ที่แจ้งเตือน
+#define TG_BOT_TOKEN          "your_bot_token"
+#define TG_CHAT_ID            "your_chat_id"
+#define AQI_ALERT_THRESHOLD   3
+#define PM25_ALERT_THRESHOLD  35.0f
+
+// MQTT
+#define MQTT_BROKER    "broker.hivemq.com"
+#define MQTT_PORT      1883
+#define BOARD_ID       "esp32_nst_01"   // ← เปลี่ยนให้ unique ต่อบอร์ด
+#define MQTT_RECONNECT_MS  5000
 
 // OLED
-#define OLED_ADDRESS  0x3C   // I2C address (0x3C หรือ 0x3D)
+#define OLED_ADDRESS  0x3C
 
 // Switch / Relay
-#define DEBOUNCE_MS          20    // debounce time (ms)
-#define WIFI_RESET_HOLD_MS   5000  // กด SW1 ค้างนานแค่ไหนเพื่อ reset WiFi (ms)
+#define DEBOUNCE_MS         20
+#define WIFI_RESET_HOLD_MS  5000
 ```
 
 ---
@@ -338,6 +417,12 @@ Baud rate: **115200**
 
 ```
 [WiFi] Connected — IP: 192.168.1.105
+[NTP] Syncing......
+[NTP] 23/05/2026 14:35:22
+[MQTT] Connecting as ESP32_esp32_nst_01_3f2a ...
+[MQTT] Connected
+[MQTT] Status: online
+[MQTT] Published relay state
 [Telegram] ส่งสำเร็จ
 ========== สภาพอากาศ นครศรีธรรมราช ==========
   อุณหภูมิ    : 32.4 °C (รู้สึกเหมือน 38.1 °C)
@@ -348,25 +433,16 @@ Baud rate: **115200**
   AQI         : 2 (พอใช้)
   PM2.5       : 12.3 µg/m³
   PM10        : 18.7 µg/m³
-  CO          : 210.5 µg/m³
-  NO2         : 5.2 µg/m³
-  O3          : 68.4 µg/m³
 ================================================
+[MQTT] Published weather
+[Telegram] ส่งสำเร็จ
 SW1 กด -> Relay1 ON
+[MQTT] Published relay state
 [Telegram] ส่งสำเร็จ
-SW2 กด -> Relay2 ON
-[Telegram] ส่งสำเร็จ
+[MQTT] Received [esp32/esp32_nst_01/control/relay/2]: ON
+[MQTT] Relay2 -> ON
+[MQTT] Published relay state
 ```
-
-**ตารางระดับ AQI (OpenWeatherMap):**
-
-| ค่า | ระดับ (EN) | ความหมาย |
-|-----|-----------|---------|
-| 1 | Good | ดี |
-| 2 | Fair | พอใช้ |
-| 3 | Moderate | ปานกลาง |
-| 4 | Poor | แย่ |
-| 5 | Very Poor | แย่มาก |
 
 ---
 
@@ -375,25 +451,41 @@ SW2 กด -> Relay2 ON
 ```
 ESP32-FirstProject-with-AI/
 ├── src/
-│   └── main.cpp              # โปรแกรมหลัก (Relay, OLED, Weather, Telegram)
+│   └── main.cpp              # โปรแกรมหลัก
 ├── platformio.ini            # config board + library dependencies
-├── ESP32DevkitBoard.md       # เอกสารอ้างอิง pinout และวงจร
+├── ESP32DevkitBoard.md       # เอกสารอ้างอิง hardware และ wiring
 ├── README.md                 # ไฟล์นี้
-└── .pio/                     # build cache (auto-generated, ไม่ต้อง commit)
+└── .pio/                     # build cache (auto-generated)
     └── libdeps/              # library ที่ดาวน์โหลดอัตโนมัติ
+```
+
+**platformio.ini:**
+```ini
+[env:esp32doit-devkit-v1]
+platform = espressif32
+board = esp32doit-devkit-v1
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+  bblanchon/ArduinoJson@^7.0.0
+  adafruit/Adafruit SSD1306@^2.5.7
+  adafruit/Adafruit GFX Library@^1.11.9
+  tzapu/WiFiManager@^2.0.17
+  knolleary/PubSubClient@^2.8
 ```
 
 ---
 
 ## ข้อควรระวัง
 
-- **OLED ใช้ 3.3V เท่านั้น** — ต่อ 5V โดยตรงจะเสียหาย
-- **GPIO 34, 35 เป็น Input-Only** — ไม่มี Internal Pull-up ต้องต่อ External 10kΩ เสมอ
+- **OLED ใช้ 3.3V เท่านั้น** — ต่อ 5V จะเสียหาย
+- **GPIO 34, 35 เป็น Input-Only** — ต้องต่อ External Pull-up 10kΩ เสมอ
 - **Relay Active Low** — LOW = เปิด, HIGH = ปิด
-- **OpenWeatherMap Free Tier** — limit 60 calls/นาที การดึงทุก 2 นาทีใช้ 2 calls/รอบ ปลอดภัย
-- **Telegram Rate Limit** — ส่งได้สูงสุด 30 ข้อความ/วินาที โปรแกรมนี้ส่งน้อยมาก ไม่มีปัญหา
-- **WiFiManager AP Portal** — หมดเวลา 120 วินาที หากไม่ตั้งค่า ESP32 จะ restart
-- **Bot Token และ Chat ID** — เป็นข้อมูลลับ ไม่ควร commit ขึ้น git สาธารณะ
+- **OpenWeatherMap Free** — limit 60 calls/นาที การดึงทุก 2 นาทีใช้ 2 calls ปลอดภัย
+- **HiveMQ Free Broker** — ไม่มี auth, ไม่เข้ารหัส (port 1883) เหมาะกับการทดสอบ production ควรใช้ TLS port 8883
+- **BOARD_ID ต้องไม่ซ้ำ** — ถ้ามีหลายบอร์ด topic จะชนกันและ relay จะถูกควบคุมพร้อมกัน
+- **Bot Token / Chat ID / API Key** — เป็นข้อมูลลับ ไม่ควร commit ขึ้น git สาธารณะ
+- **PubSubClient buffer** — default 256 bytes ถ้า payload ใหญ่ขึ้นให้เพิ่ม `mqtt.setBufferSize(512)`
 
 ---
 

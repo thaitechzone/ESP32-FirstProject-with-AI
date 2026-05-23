@@ -360,6 +360,20 @@ void setup() {
 }
 ```
 
+**Layout หน้าจอในโปรเจคนี้** (128×64 px):
+```
+┌──────────────────────────────┐  y=0
+│▓▓ Nakhon Si Thammarat ▓▓▓▓▓▓│  Title bar (ขาว/ดำ)
+│ 23/05/2026  14:35:22         │  y=11  วันที่+เวลา (NTP)
+│ T:32.4°C         H:78%      │  y=22  อุณหภูมิ/ความชื้น
+│ AQI:2(Good)      PM:12       │  y=33  AQI/PM2.5
+│──────────────────────────────│  y=43  divider
+│ ╔R1:ON╗  [R2:--]  [R3:--]   │  y=45  Relay status
+└──────────────────────────────┘  y=63
+```
+- นาฬิกาอัปเดตทุก **1 วินาที**
+- Relay กล่องขาวทึบ = ON / เส้นขอบ = OFF
+
 ⚠️ **ข้อควรระวัง - OLED**:
 - ใช้ไฟ 3.3V เท่านั้น (ห้ามต่อ 5V โดยตรง)
 - I2C ใช้ GPIO 21 (SDA) และ GPIO 22 (SCL) ร่วมกับอุปกรณ์ I2C ตัวอื่นได้
@@ -378,6 +392,45 @@ void setup() {
 ### สำหรับการหา Power Supply
 - ใช้ USB adapter 5V/1A ขึ้นไป
 - หรือ external regulated 3.3V ที่ให้กระแส 500mA ขึ้นไป
+
+### NTP Server (เวลาจริง Asia/Bangkok)
+
+ESP32 ซิงค์เวลาจาก NTP Server ผ่าน Internet หลัง WiFi connect ใช้ `time.h` built-in ไม่ต้องติดตั้ง library เพิ่ม
+
+| ค่า | รายละเอียด |
+|-----|-----------|
+| NTP Server | `pool.ntp.org` |
+| Timezone | Asia/Bangkok (UTC+7) |
+| UTC Offset | `25200` วินาที |
+| DST Offset | `0` (ไทยไม่มี DST) |
+| อัปเดต OLED | ทุก 1 วินาที |
+
+**การตั้งค่าใน Code**:
+```cpp
+#define NTP_SERVER  "pool.ntp.org"
+#define TZ_OFFSET   25200   // 7 * 3600
+
+// เรียกใน setup() หลัง WiFi connected
+configTime(TZ_OFFSET, 0, NTP_SERVER);
+
+// อ่านเวลา
+struct tm t;
+if (getLocalTime(&t)) {
+  // t.tm_hour, t.tm_min, t.tm_sec, t.tm_mday, t.tm_mon+1, t.tm_year+1900
+}
+```
+
+**รูปแบบที่แสดงบน OLED** (แถวที่ 2 ของหน้าจอ):
+```
+23/05/2026  14:35:22
+```
+
+⚠️ **ข้อควรระวัง - NTP**:
+- ต้องเชื่อมต่อ Internet ได้จึงจะ sync ได้
+- หลัง sync ครั้งแรก ESP32 เก็บเวลาใน RTC ภายในตัว
+- ถ้า sync ไม่ได้ภายใน 10 วินาที OLED แสดง `Syncing time...`
+
+---
 
 ### Telegram Bot Notification
 
@@ -425,6 +478,114 @@ void sendTelegram(const String& msg) {
 
 ---
 
+### MQTT (HiveMQ Free Broker)
+
+ESP32 เชื่อมต่อ MQTT Broker สาธารณะ HiveMQ เพื่อส่ง Telemetry และรับคำสั่ง Control Relay จากระยะไกล ใช้ Library **PubSubClient**
+
+**Broker ที่ใช้**:
+
+| ค่า | รายละเอียด |
+|-----|-----------|
+| Broker Host | `broker.hivemq.com` |
+| Port | `1883` (TCP, ไม่เข้ารหัส) |
+| Client ID | `ESP32_<BOARD_ID>_<random hex>` (unique ทุก session) |
+| Authentication | ไม่ต้องใช้ Username/Password (Public broker) |
+
+**BOARD_ID** — ค่าคงที่ที่กำหนดใน `#define BOARD_ID "esp32_nst_01"` ใช้เป็น namespace ของ Topic เพื่อป้องกัน topic ชนกันเมื่อมีหลายบอร์ด
+
+---
+
+**Topic Schema**:
+
+```
+esp32/<BOARD_ID>/
+├── telemetry/
+│   ├── status       ← สถานะบอร์ด (online/offline/IP/เวลา)
+│   ├── weather      ← ข้อมูลอากาศ (Temp/Hum/AQI/PM2.5/PM10)
+│   └── relay        ← สถานะ Relay 1/2/3
+└── control/
+    └── relay/
+        ├── 1        ← สั่ง ON/OFF Relay 1
+        ├── 2        ← สั่ง ON/OFF Relay 2
+        └── 3        ← สั่ง ON/OFF Relay 3
+```
+
+---
+
+**Payload ตัวอย่าง (Telemetry)**:
+
+`esp32/esp32_nst_01/telemetry/status` (retained):
+```json
+{ "status": "online", "ip": "192.168.1.42", "time": "14:35:22" }
+```
+
+`esp32/esp32_nst_01/telemetry/weather`:
+```json
+{ "temp": 32.4, "humidity": 78, "aqi": 2, "pm25": 12.5, "pm10": 20.1 }
+```
+
+`esp32/esp32_nst_01/telemetry/relay` (retained):
+```json
+{ "relay1": true, "relay2": false, "relay3": false }
+```
+
+**LWT (Last Will and Testament)** — เมื่อบอร์ด disconnect กะทันหัน Broker จะส่ง payload นี้แทน:
+```json
+{ "status": "offline" }
+```
+Topic LWT: `esp32/esp32_nst_01/telemetry/status`
+
+---
+
+**Control Payload** (ส่งไปที่ `esp32/esp32_nst_01/control/relay/1`):
+
+| Payload | ผล |
+|---------|-----|
+| `ON` หรือ `1` หรือ `TRUE` | เปิด Relay |
+| `OFF` หรือ `0` หรือ `FALSE` | ปิด Relay |
+
+(Case-insensitive — รองรับตัวพิมพ์เล็ก/ใหญ่)
+
+---
+
+**OLED Indicator**: ในแถบชื่อบนสุดของหน้าจอมีจุด `•` แสดงสถานะ MQTT
+```
+▓▓ Nakhon Si Thammarat • ▓▓▓   ← มีจุด = MQTT connected
+▓▓ Nakhon Si Thammarat   ▓▓▓   ← ไม่มีจุด = MQTT disconnected
+```
+
+---
+
+**การตั้งค่าใน Code**:
+```cpp
+#define MQTT_BROKER   "broker.hivemq.com"
+#define MQTT_PORT     1883
+#define BOARD_ID      "esp32_nst_01"
+#define TOPIC_BASE              "esp32/" BOARD_ID
+#define TOPIC_STATUS            TOPIC_BASE "/telemetry/status"
+#define TOPIC_WEATHER           TOPIC_BASE "/telemetry/weather"
+#define TOPIC_RELAY             TOPIC_BASE "/telemetry/relay"
+#define TOPIC_CTRL_RELAY_1      TOPIC_BASE "/control/relay/1"
+#define TOPIC_CTRL_RELAY_2      TOPIC_BASE "/control/relay/2"
+#define TOPIC_CTRL_RELAY_3      TOPIC_BASE "/control/relay/3"
+#define MQTT_RECONNECT_MS  5000   // retry interval เมื่อ disconnect
+```
+
+**Auto-reconnect**: loop() ตรวจสอบ `mqtt.connected()` ทุก 5 วินาที ถ้าหลุดจะเชื่อมต่อใหม่อัตโนมัติ (non-blocking)
+
+**ทดสอบด้วย MQTT Explorer**:
+1. เปิด [MQTT Explorer](https://mqtt-explorer.com/)
+2. Host: `broker.hivemq.com`, Port: `1883`
+3. Connect → ดู Topic `esp32/esp32_nst_01/#`
+4. Publish ไปที่ `esp32/esp32_nst_01/control/relay/1` payload `ON` → Relay 1 เปิด
+
+⚠️ **ข้อควรระวัง - MQTT**:
+- HiveMQ Free Broker เป็น **Public** — ใครก็ subscribe/publish ได้ → ไม่ควรส่งข้อมูลลับ
+- Client ID ต้องไม่ซ้ำกัน (random hex ช่วยป้องกัน)
+- Port 1883 ไม่เข้ารหัส ถ้าต้องการความปลอดภัยให้ใช้ TLS port 8883
+
+---
+
 ## ซอฟต์แวร์และไลบรารี่
 
 ### Core Libraries (มีมาตามค่าเริ่มต้น)
@@ -443,6 +604,7 @@ void sendTelegram(const String& msg) {
 | `adafruit/Adafruit SSD1306` | ^2.5.7 | OLED display driver |
 | `adafruit/Adafruit GFX Library` | ^1.11.9 | Graphics primitives |
 | `tzapu/WiFiManager` | ^2.0.17 | WiFi Captive Portal |
+| `knolleary/PubSubClient` | ^2.8 | MQTT client |
 
 ```ini
 [env:esp32doit-devkit-v1]
@@ -455,6 +617,7 @@ lib_deps =
   adafruit/Adafruit SSD1306@^2.5.7
   adafruit/Adafruit GFX Library@^1.11.9
   tzapu/WiFiManager@^2.0.17
+  knolleary/PubSubClient@^2.8
 ```
 
 ## โหมดการสนับสนุน
